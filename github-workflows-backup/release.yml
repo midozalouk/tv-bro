@@ -1,0 +1,322 @@
+name: Release Build & Deploy
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release Version (e.g., v2.0.2)'
+        required: true
+        type: string
+      create_release:
+        description: 'Create GitHub Release'
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Determine Version
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          VERSION="${{ github.event.inputs.version }}"
+          TAG="${{ github.event.inputs.version }}"
+        elif [ "${{ github.event_name }}" = "push" ]; then
+          TAG=${GITHUB_REF#refs/tags/}
+          VERSION=${TAG#v}
+        else
+          TAG=${{ github.event.release.tag_name }}
+          VERSION=${TAG#v}
+        fi
+        
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "tag=$TAG" >> $GITHUB_OUTPUT
+        echo "Release version: $VERSION"
+        echo "Release tag: $TAG"
+
+  build-release-apks:
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        flavor: [generic, foss]
+        include:
+          - flavor: generic
+            display_name: "Generic"
+            firebase: true
+          - flavor: foss
+            display_name: "FOSS"
+            firebase: false
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Java JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: gradle
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+      with:
+        api-level: 34
+        build-tools: 34.0.0
+        cmake-version: 3.22.1
+        ndk-version: 25.2.9519653
+
+    - name: Cache Gradle Dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+          ~/.android/build-cache
+        key: ${{ runner.os }}-gradle-release-${{ hashFiles('**/*.gradle*') }}
+        restore-keys: |
+          ${{ runner.os }}-gradle-
+
+    - name: Create Release Keystore
+      if: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+      run: |
+        echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > app/release.keystore
+        ls -la app/release.keystore
+
+    - name: Create local.properties
+      run: |
+        echo "sdk.dir=$ANDROID_HOME" > local.properties
+        if [ -f app/release.keystore ]; then
+          echo "storeFile=release.keystore" >> local.properties
+          echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}" >> local.properties
+          echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> local.properties
+          echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> local.properties
+        fi
+
+    - name: Make Gradle Wrapper Executable
+      run: chmod +x ./gradlew
+
+    - name: Update Version Info
+      run: |
+        VERSION="${{ needs.prepare-release.outputs.version }}"
+        echo "Updating version to: $VERSION"
+        
+        # Update version in build.gradle.kts if needed
+        sed -i "s/versionName = \".*\"/versionName = \"$VERSION\"/" app/build.gradle.kts
+        
+        # Update latest_version.json
+        jq --arg version "$VERSION" '.version = $version' latest_version.json > tmp.json && mv tmp.json latest_version.json
+
+    - name: Clean Project
+      run: ./gradlew clean
+
+    - name: Build Release APK
+      run: |
+        echo "Building ${{ matrix.flavor }} release APK..."
+        ./gradlew assemble${{ matrix.display_name }}Release
+        
+        # List generated APKs
+        echo "Generated APK files:"
+        find app/build/outputs/apk -name "*.apk" -type f -exec ls -la {} \;
+
+    - name: Sign APK (if unsigned)
+      if: ${{ !secrets.RELEASE_KEYSTORE_BASE64 }}
+      run: |
+        echo "⚠️ No signing key provided - APK will be unsigned"
+        echo "For production releases, add signing key to secrets:"
+        echo "- RELEASE_KEYSTORE_BASE64: Base64 encoded keystore file"
+        echo "- KEYSTORE_PASSWORD: Keystore password"
+        echo "- KEY_ALIAS: Key alias"
+        echo "- KEY_PASSWORD: Key password"
+
+    - name: Rename APK Files
+      run: |
+        VERSION="${{ needs.prepare-release.outputs.version }}"
+        APK_DIR="app/build/outputs/apk/${{ matrix.flavor }}/release"
+        
+        for apk in $APK_DIR/*.apk; do
+          if [ -f "$apk" ]; then
+            # Extract architecture from filename
+            ARCH=$(basename "$apk" | grep -o 'arm64-v8a\|armeabi-v7a\|x86\|x86_64' || echo "universal")
+            
+            # Create new filename
+            NEW_NAME="tv-bro-${{ matrix.flavor }}-${VERSION}-${ARCH}.apk"
+            
+            # Rename file
+            mv "$apk" "$APK_DIR/$NEW_NAME"
+            echo "Renamed: $(basename "$apk") -> $NEW_NAME"
+          fi
+        done
+
+    - name: Generate APK Info
+      run: |
+        VERSION="${{ needs.prepare-release.outputs.version }}"
+        APK_DIR="app/build/outputs/apk/${{ matrix.flavor }}/release"
+        INFO_FILE="$APK_DIR/apk-info-${{ matrix.flavor }}.txt"
+        
+        echo "TV Bro - ${{ matrix.display_name }} Release" > "$INFO_FILE"
+        echo "Version: $VERSION" >> "$INFO_FILE"
+        echo "Build Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$INFO_FILE"
+        echo "Flavor: ${{ matrix.flavor }}" >> "$INFO_FILE"
+        echo "Commit: ${{ github.sha }}" >> "$INFO_FILE"
+        echo "" >> "$INFO_FILE"
+        echo "APK Files:" >> "$INFO_FILE"
+        
+        for apk in $APK_DIR/*.apk; do
+          if [ -f "$apk" ]; then
+            SIZE=$(stat -c%s "$apk")
+            SIZE_MB=$((SIZE / 1024 / 1024))
+            echo "- $(basename "$apk") (${SIZE_MB} MB)" >> "$INFO_FILE"
+          fi
+        done
+
+    - name: Upload Release APK Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: tv-bro-${{ matrix.flavor }}-release-${{ needs.prepare-release.outputs.version }}
+        path: |
+          app/build/outputs/apk/${{ matrix.flavor }}/release/*.apk
+          app/build/outputs/apk/${{ matrix.flavor }}/release/*.txt
+        retention-days: 90
+
+  create-github-release:
+    needs: [prepare-release, build-release-apks]
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.create_release == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Download All Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: release-artifacts
+
+    - name: Prepare Release Assets
+      run: |
+        mkdir -p release-assets
+        
+        # Copy all APK files to release assets
+        find release-artifacts -name "*.apk" -exec cp {} release-assets/ \;
+        find release-artifacts -name "*.txt" -exec cp {} release-assets/ \;
+        
+        # List all release assets
+        echo "Release assets:"
+        ls -la release-assets/
+
+    - name: Generate Release Notes
+      run: |
+        VERSION="${{ needs.prepare-release.outputs.version }}"
+        echo "# TV Bro $VERSION Release" > RELEASE_NOTES.md
+        echo "" >> RELEASE_NOTES.md
+        echo "## 📱 Download Options" >> RELEASE_NOTES.md
+        echo "" >> RELEASE_NOTES.md
+        
+        # List APK files with descriptions
+        for apk in release-assets/*.apk; do
+          if [ -f "$apk" ]; then
+            filename=$(basename "$apk")
+            if [[ "$filename" == *"generic"* ]]; then
+              echo "- **$filename** - Standard version with all features" >> RELEASE_NOTES.md
+            elif [[ "$filename" == *"foss"* ]]; then
+              echo "- **$filename** - FOSS version without proprietary components" >> RELEASE_NOTES.md
+            fi
+          fi
+        done
+        
+        echo "" >> RELEASE_NOTES.md
+        echo "## 🚀 What's New" >> RELEASE_NOTES.md
+        echo "" >> RELEASE_NOTES.md
+        
+        # Get commit messages since last tag
+        LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+        if [ -n "$LAST_TAG" ]; then
+          echo "### Changes since $LAST_TAG:" >> RELEASE_NOTES.md
+          git log --pretty=format:"- %s" $LAST_TAG..HEAD >> RELEASE_NOTES.md
+        else
+          echo "- Custom web engine implementation guide added" >> RELEASE_NOTES.md
+          echo "- Enhanced browser engine support" >> RELEASE_NOTES.md
+          echo "- Improved TV remote compatibility" >> RELEASE_NOTES.md
+        fi
+        
+        echo "" >> RELEASE_NOTES.md
+        echo "## 🔧 Installation" >> RELEASE_NOTES.md
+        echo "" >> RELEASE_NOTES.md
+        echo "1. Download the appropriate APK for your device" >> RELEASE_NOTES.md
+        echo "2. Enable \"Unknown Sources\" in Android settings" >> RELEASE_NOTES.md
+        echo "3. Install the APK file" >> RELEASE_NOTES.md
+        echo "4. Launch TV Bro and enjoy browsing!" >> RELEASE_NOTES.md
+        
+        echo "" >> RELEASE_NOTES.md
+        echo "## 📋 System Requirements" >> RELEASE_NOTES.md
+        echo "- Android 7.0 (API 24) or higher" >> RELEASE_NOTES.md
+        echo "- 2GB RAM recommended" >> RELEASE_NOTES.md
+        echo "- 100MB free storage space" >> RELEASE_NOTES.md
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ needs.prepare-release.outputs.tag }}
+        name: "TV Bro ${{ needs.prepare-release.outputs.version }}"
+        body_path: RELEASE_NOTES.md
+        files: |
+          release-assets/*.apk
+          release-assets/*.txt
+        draft: false
+        prerelease: ${{ contains(needs.prepare-release.outputs.version, 'beta') || contains(needs.prepare-release.outputs.version, 'alpha') }}
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-version-json:
+    needs: [prepare-release, create-github-release]
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Update latest_version.json
+      run: |
+        VERSION="${{ needs.prepare-release.outputs.version }}"
+        TAG="${{ needs.prepare-release.outputs.tag }}"
+        
+        # Update the version JSON file
+        jq --arg version "$VERSION" \
+           --arg tag "$TAG" \
+           --arg date "$(date -u '+%Y-%m-%d')" \
+           '.version = $version | .tag = $tag | .release_date = $date' \
+           latest_version.json > tmp.json && mv tmp.json latest_version.json
+
+    - name: Commit Version Update
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add latest_version.json
+        git commit -m "Update version to ${{ needs.prepare-release.outputs.version }}" || exit 0
+        git push

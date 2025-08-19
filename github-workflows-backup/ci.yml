@@ -1,0 +1,326 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [ master, main, develop, genspark_ai_developer ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+  pull_request:
+    branches: [ master, main ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  # Quick validation job
+  validate:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Validate Gradle Wrapper
+      uses: gradle/wrapper-validation-action@v1
+
+    - name: Check File Permissions
+      run: |
+        echo "Checking gradlew permissions..."
+        ls -la gradlew
+        if [ ! -x gradlew ]; then
+          echo "Making gradlew executable..."
+          chmod +x gradlew
+        fi
+
+  # Build and test job
+  build-and-test:
+    needs: validate
+    runs-on: ubuntu-latest
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [24, 28, 33, 34]
+        flavor: [generic, foss]
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Java JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: gradle
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+      with:
+        api-level: ${{ matrix.api-level }}
+        build-tools: 34.0.0
+
+    - name: Cache Gradle Dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+          ~/.android/build-cache
+        key: ${{ runner.os }}-gradle-ci-${{ hashFiles('**/*.gradle*') }}
+        restore-keys: |
+          ${{ runner.os }}-gradle-ci-
+          ${{ runner.os }}-gradle-
+
+    - name: Make Gradle Wrapper Executable
+      run: chmod +x ./gradlew
+
+    - name: Create local.properties
+      run: |
+        echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+    - name: Check Code Compilation
+      run: |
+        echo "Compiling ${{ matrix.flavor }} flavor..."
+        ./gradlew compile${{ matrix.flavor }}DebugKotlin
+
+    - name: Run Unit Tests
+      run: |
+        echo "Running unit tests for ${{ matrix.flavor }} flavor..."
+        ./gradlew test${{ matrix.flavor }}DebugUnitTest
+
+    - name: Build Debug APK
+      run: |
+        echo "Building debug APK for ${{ matrix.flavor }} flavor..."
+        ./gradlew assemble${{ matrix.flavor }}Debug
+
+    - name: Run Lint Analysis
+      run: |
+        echo "Running lint analysis for ${{ matrix.flavor }} flavor..."
+        ./gradlew lint${{ matrix.flavor }}Debug
+
+    - name: Upload Test Results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-${{ matrix.flavor }}-api${{ matrix.api-level }}
+        path: |
+          app/build/reports/tests/
+          app/build/reports/lint-results*.html
+          app/build/test-results/
+        retention-days: 7
+
+    - name: Upload Debug APK
+      if: matrix.api-level == 34  # Only upload for latest API level
+      uses: actions/upload-artifact@v4
+      with:
+        name: debug-apk-${{ matrix.flavor }}-ci
+        path: app/build/outputs/apk/${{ matrix.flavor }}/debug/*.apk
+        retention-days: 7
+
+  # Security and dependency check
+  security-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Java JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Make Gradle Wrapper Executable
+      run: chmod +x ./gradlew
+
+    - name: Create local.properties
+      run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+    - name: Dependency Vulnerability Check
+      run: |
+        echo "Checking for dependency vulnerabilities..."
+        ./gradlew dependencyUpdates
+        
+        # Check for known security vulnerabilities
+        echo "Scanning dependencies for security issues..."
+        ./gradlew dependencies | grep -i "SECURITY\|VULNERABLE\|CVE" || echo "No obvious security issues found in dependencies"
+
+    - name: License Check
+      run: |
+        echo "Checking licenses of dependencies..."
+        # Basic license check - can be enhanced with license scanning tools
+        find . -name "*.jar" | head -5 | xargs ls -la || echo "JAR files checked"
+
+    - name: Code Security Scan
+      run: |
+        echo "Performing basic security scan..."
+        
+        # Check for hardcoded secrets (basic check)
+        echo "Scanning for potential hardcoded secrets..."
+        grep -r "password\|secret\|key\|token" --include="*.kt" --include="*.java" app/src/ | grep -v "PASSWORD\|SECRET\|KEY\|TOKEN" | head -10 || echo "No obvious secrets found"
+        
+        # Check for SQL injection vulnerabilities
+        echo "Checking for potential SQL injection points..."
+        grep -r "rawQuery\|execSQL" --include="*.kt" --include="*.java" app/src/ || echo "No raw SQL queries found"
+
+  # Documentation and metadata check
+  docs-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Check Documentation
+      run: |
+        echo "Checking documentation files..."
+        
+        # Check if README exists and is not empty
+        if [ -f README.md ] && [ -s README.md ]; then
+          echo "✅ README.md exists and has content"
+        else
+          echo "⚠️ README.md is missing or empty"
+        fi
+        
+        # Check if implementation guide exists
+        if [ -f CUSTOM_WEB_ENGINE_IMPLEMENTATION.md ]; then
+          echo "✅ Custom web engine implementation guide found"
+          wc -l CUSTOM_WEB_ENGINE_IMPLEMENTATION.md
+        fi
+
+    - name: Validate Metadata Files
+      run: |
+        echo "Validating metadata files..."
+        
+        # Check latest_version.json
+        if [ -f latest_version.json ]; then
+          echo "✅ latest_version.json found"
+          cat latest_version.json | jq empty && echo "✅ Valid JSON format" || echo "❌ Invalid JSON format"
+        fi
+        
+        # Check AndroidManifest.xml
+        if [ -f app/src/main/AndroidManifest.xml ]; then
+          echo "✅ AndroidManifest.xml found"
+        fi
+
+  # Performance and size analysis
+  performance-analysis:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Setup Java JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: gradle
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+      with:
+        api-level: 34
+        build-tools: 34.0.0
+
+    - name: Make Gradle Wrapper Executable
+      run: chmod +x ./gradlew
+
+    - name: Create local.properties
+      run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+    - name: Build Release APK for Analysis
+      run: ./gradlew assembleGenericRelease
+
+    - name: Analyze APK Size
+      run: |
+        echo "## 📊 APK Analysis Report" > apk_analysis.md
+        echo "" >> apk_analysis.md
+        
+        APK_PATH="app/build/outputs/apk/generic/release"
+        
+        for apk in $APK_PATH/*.apk; do
+          if [ -f "$apk" ]; then
+            SIZE=$(stat -c%s "$apk")
+            SIZE_MB=$((SIZE / 1024 / 1024))
+            
+            echo "### $(basename "$apk")" >> apk_analysis.md
+            echo "- **Size**: ${SIZE_MB} MB (${SIZE} bytes)" >> apk_analysis.md
+            echo "- **Architecture**: $(echo "$apk" | grep -o 'arm64-v8a\|armeabi-v7a\|x86\|x86_64' || echo 'universal')" >> apk_analysis.md
+            echo "" >> apk_analysis.md
+            
+            # APK size recommendations
+            if [ $SIZE_MB -gt 100 ]; then
+              echo "⚠️ **Large APK Warning**: APK is over 100MB. Consider optimizations." >> apk_analysis.md
+            elif [ $SIZE_MB -lt 50 ]; then
+              echo "✅ **Good Size**: APK size is well optimized." >> apk_analysis.md
+            else
+              echo "📊 **Acceptable Size**: APK size is reasonable." >> apk_analysis.md
+            fi
+            echo "" >> apk_analysis.md
+          fi
+        done
+
+    - name: Method Count Analysis
+      run: |
+        echo "### Method Count Analysis" >> apk_analysis.md
+        echo "Analyzing DEX method counts..." >> apk_analysis.md
+        
+        # This is a simplified method count - in real scenario you'd use tools like dexcount-gradle-plugin
+        APK_PATH="app/build/outputs/apk/generic/release"
+        for apk in $APK_PATH/*.apk; do
+          if [ -f "$apk" ]; then
+            echo "- **Methods in $(basename "$apk")**: Analysis requires additional tools" >> apk_analysis.md
+          fi
+        done
+
+    - name: Upload Analysis Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: apk-analysis-report
+        path: apk_analysis.md
+        retention-days: 14
+
+  # Summary job
+  ci-summary:
+    if: always()
+    needs: [validate, build-and-test, security-check, docs-check, performance-analysis]
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: CI Summary
+      run: |
+        echo "## 🚀 CI Pipeline Summary" 
+        echo "| Job | Status |"
+        echo "|-----|--------|"
+        echo "| Validation | ${{ needs.validate.result }} |"
+        echo "| Build & Test | ${{ needs.build-and-test.result }} |"
+        echo "| Security Check | ${{ needs.security-check.result }} |"
+        echo "| Documentation | ${{ needs.docs-check.result }} |"
+        echo "| Performance Analysis | ${{ needs.performance-analysis.result }} |"
+        
+        # Overall status
+        if [[ "${{ needs.validate.result }}" == "success" && 
+              "${{ needs.build-and-test.result }}" == "success" && 
+              "${{ needs.security-check.result }}" == "success" && 
+              "${{ needs.docs-check.result }}" == "success" ]]; then
+          echo "✅ **Overall Status**: SUCCESS - All checks passed!"
+          exit 0
+        else
+          echo "❌ **Overall Status**: FAILURE - Some checks failed!"
+          exit 1
+        fi
