@@ -299,18 +299,22 @@ jobs:
       run: chmod +x ./gradlew
 
     - name: Create Release Keystore (if secrets are provided)
-      if: ${{ secrets.RELEASE_KEYSTORE }}
+      if: env.RELEASE_KEYSTORE != ''
       run: |
         echo "${{ secrets.RELEASE_KEYSTORE }}" | base64 -d > release.keystore
+      env:
+        RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE }}
 
     - name: Create local.properties for Release
-      if: ${{ secrets.RELEASE_KEYSTORE }}
+      if: env.RELEASE_KEYSTORE != ''
       run: |
         echo "sdk.dir=$ANDROID_HOME" > local.properties
         echo "storeFile=../release.keystore" >> local.properties
         echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}" >> local.properties
         echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> local.properties
         echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> local.properties
+      env:
+        RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE }}
 
     - name: Build Release APKs
       run: |
@@ -318,8 +322,10 @@ jobs:
         ./gradlew assembleFossRelease
 
     - name: Sign APK (if keystore available)
-      if: ${{ secrets.RELEASE_KEYSTORE }}
+      if: env.RELEASE_KEYSTORE != ''
       run: echo "APKs signed during build process"
+      env:
+        RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE }}
 
     - name: Create Release
       uses: softprops/action-gh-release@v1
