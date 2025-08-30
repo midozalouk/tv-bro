@@ -28,8 +28,11 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
       with:
-        api-level: 34
-        build-tools: 34.0.0
+        cmdline-tools-version: 8512546
+        packages: |
+          platform-tools
+          platforms;android-34
+          build-tools;34.0.0
 
     - name: Cache Gradle Dependencies
       uses: actions/cache@v4
@@ -169,8 +172,11 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
       with:
-        api-level: 34
-        build-tools: 34.0.0
+        cmdline-tools-version: 8512546
+        packages: |
+          platform-tools
+          platforms;android-34
+          build-tools;34.0.0
 
     - name: Compare APK Sizes
       run: |

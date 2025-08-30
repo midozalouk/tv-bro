@@ -57,13 +57,6 @@ jobs:
     strategy:
       matrix:
         flavor: [generic, foss]
-        include:
-          - flavor: generic
-            display_name: "Generic"
-            firebase: true
-          - flavor: foss
-            display_name: "FOSS"
-            firebase: false
     
     steps:
     - name: Checkout Repository
@@ -81,10 +74,13 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
       with:
-        api-level: 34
-        build-tools: 34.0.0
-        cmake-version: 3.22.1
-        ndk-version: 25.2.9519653
+        cmdline-tools-version: 8512546
+        packages: |
+          platform-tools
+          platforms;android-34
+          build-tools;34.0.0
+          cmake;3.22.1
+          ndk;25.2.9519653
 
     - name: Cache Gradle Dependencies
       uses: actions/cache@v4
@@ -92,7 +88,6 @@ jobs:
         path: |
           ~/.gradle/caches
           ~/.gradle/wrapper
-          ~/.android/build-cache
         key: ${{ runner.os }}-gradle-release-${{ hashFiles('**/*.gradle*') }}
         restore-keys: |
           ${{ runner.os }}-gradle-
@@ -135,7 +130,8 @@ jobs:
     - name: Build Release APK
       run: |
         echo "Building ${{ matrix.flavor }} release APK..."
-        ./gradlew assemble${{ matrix.display_name }}Release
+        FLAVOR=$(echo "${{ matrix.flavor }}" | sed 's/^./\u&/')
+        ./gradlew assemble${FLAVOR}Release
         
         # List generated APKs
         echo "Generated APK files:"

@@ -65,8 +65,11 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
       with:
-        api-level: ${{ matrix.api-level }}
-        build-tools: 34.0.0
+        cmdline-tools-version: 8512546
+        packages: |
+          platform-tools
+          platforms;android-${{ matrix.api-level }}
+          build-tools;34.0.0
 
     - name: Cache Gradle Dependencies
       uses: actions/cache@v4
@@ -74,7 +77,6 @@ jobs:
         path: |
           ~/.gradle/caches
           ~/.gradle/wrapper
-          ~/.android/build-cache
         key: ${{ runner.os }}-gradle-ci-${{ hashFiles('**/*.gradle*') }}
         restore-keys: |
           ${{ runner.os }}-gradle-ci-
@@ -89,23 +91,27 @@ jobs:
 
     - name: Check Code Compilation
       run: |
-        echo "Compiling ${{ matrix.flavor }} flavor..."
-        ./gradlew compile${{ matrix.flavor }}DebugKotlin
+        FLAVOR=$(echo "${{ matrix.flavor }}" | sed 's/^./\u&/')
+        echo "Compiling ${FLAVOR} flavor..."
+        ./gradlew compile${FLAVOR}DebugKotlin
 
     - name: Run Unit Tests
       run: |
-        echo "Running unit tests for ${{ matrix.flavor }} flavor..."
-        ./gradlew test${{ matrix.flavor }}DebugUnitTest
+        FLAVOR=$(echo "${{ matrix.flavor }}" | sed 's/^./\u&/')
+        echo "Running unit tests for ${FLAVOR} flavor..."
+        ./gradlew test${FLAVOR}DebugUnitTest
 
     - name: Build Debug APK
       run: |
-        echo "Building debug APK for ${{ matrix.flavor }} flavor..."
-        ./gradlew assemble${{ matrix.flavor }}Debug
+        FLAVOR=$(echo "${{ matrix.flavor }}" | sed 's/^./\u&/')
+        echo "Building debug APK for ${FLAVOR} flavor..."
+        ./gradlew assemble${FLAVOR}Debug
 
     - name: Run Lint Analysis
       run: |
-        echo "Running lint analysis for ${{ matrix.flavor }} flavor..."
-        ./gradlew lint${{ matrix.flavor }}Debug
+        FLAVOR=$(echo "${{ matrix.flavor }}" | sed 's/^./\u&/')
+        echo "Running lint analysis for ${FLAVOR} flavor..."
+        ./gradlew lint${FLAVOR}Debug
 
     - name: Upload Test Results
       if: always()
